@@ -1,0 +1,222 @@
+import sounddevice as sd
+import whisper
+import scipy.io.wavfile as wav
+import numpy as np
+import os
+import subprocess
+
+
+print("Loading Whisper...")
+model = whisper.load_model("base")
+
+
+# -------- AUTO DETECT USB MIC --------
+
+device = None
+devices = sd.query_devices()
+
+for i, d in enumerate(devices):
+    if "usb" in d['name'].lower():
+        device = i
+        print("Using mic:", d['name'], "id:", i)
+        break
+
+if device is None:
+    print("No USB microphone found")
+    exit()
+
+
+# use correct samplerate automatically
+samplerate = int(sd.query_devices(device)['default_samplerate'])
+
+duration = 15
+
+
+print("Say 'hello' to start.")
+
+
+# -------- FUNCTION TO RECORD + TRANSCRIBE --------
+
+def listen():
+
+    recording = sd.rec(
+        int(duration * samplerate),
+        samplerate=samplerate,
+        channels=1,
+        device=device
+    )
+
+    sd.wait()
+
+    audio = recording.flatten()
+
+    volume = np.max(np.abs(audio))
+
+    print("Volume:", volume)
+
+
+    if volume < 0.2:
+        print("Too quiet, ignoring...")
+        return ""
+
+
+    wav.write(
+        "temp.wav",
+        samplerate,
+        recording
+    )
+
+
+    result = model.transcribe(
+        "temp.wav",
+        fp16=False,
+        language="en"
+    )
+
+
+    return result["text"].strip()
+
+
+
+# -------- FUNCTION TO RUN OLLAMA --------
+
+def ask_qwen(prompt, model_name):
+
+    result = subprocess.run(
+        [
+            "ollama",
+            "run",
+            model_name,
+            prompt
+        ],
+        capture_output=True,
+        text=True
+    )
+
+    return result.stdout.strip()
+
+
+
+# -------- MAIN LOOP --------
+
+while True:
+
+
+    print("\nListening for wake word...")
+
+
+    text = listen()
+
+
+    if text == "":
+        continue
+
+
+    text = text.lower()
+
+
+    print("You said:", text)
+
+
+
+    # -------- WAKE WORD --------
+
+    if "hello" in text:
+
+
+        print("Qwen activated. Start talking.")
+
+
+
+        while True:
+
+
+            print("\nSpeak to Qwen...")
+
+
+            user_text = listen()
+
+
+            if user_text == "":
+                continue
+
+
+
+            print("You:", user_text)
+
+
+
+            # stop command
+
+            if "stop" in user_text.lower():
+
+                print("Conversation ended.")
+                break
+
+
+
+            # -------- QWEN 2 MAIN RESPONSE --------
+
+
+            print("Thinking...")
+
+
+            response = ask_qwen(
+                user_text,
+                "qwen2:1.5b"
+            )
+
+
+            print("\nQwen raw response:")
+            print(response)
+
+
+
+            # -------- QWEN 3 SUMMARY --------
+
+
+            print("\nSummarizing...")
+
+
+            summary_prompt = f"""
+
+You are a voice assistant summarizer.
+
+Convert the following AI response into a short answer that can be spoken aloud.
+
+Rules:
+- Output ONLY the final spoken answer.
+- Remove terminal commands.
+- Remove code.
+- Remove file paths.
+- Remove debugging information.
+- Remove thinking or reasoning.
+- Do not say "here is the summary".
+- Keep important information.
+- Make it natural.
+
+AI response:
+
+{response}
+
+"""
+
+
+            summary = ask_qwen(
+                summary_prompt,
+                "qwen2:0.5b"
+            )
+
+
+
+            print("\nQwen voice response:")
+            print(summary)
+
+
+
+            # -------- SPEAK ONLY SUMMARY --------
+
+
+            os.system(
+                f'echo "{summary}" | espeak --stdout | aplay -D plughw:2,0'
+            )
